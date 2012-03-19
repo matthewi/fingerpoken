@@ -1,68 +1,75 @@
 #!/usr/bin/env ruby
 
 require "rubygems"
-require "ffi"
+require "xdo/keyboard"
+require "xdo/mouse"
+require "xdo/xwindow"
 require "fingerpoken/target"
 
-class FingerPoken::Target::Xdo < FingerPoken::Target
-  module LibXdo
-    extend FFI::Library
-    ffi_lib "libxdo.so"
-
-    attach_function :xdo_new, [:string], :pointer
-    attach_function :xdo_mousemove, [:pointer, :int, :int, :int], :int
-    attach_function :xdo_mousemove_relative, [:pointer, :int, :int], :int
-    attach_function :xdo_click, [:pointer, :long, :int], :int
-    attach_function :xdo_mousedown, [:pointer, :long, :int], :int
-    attach_function :xdo_mouseup, [:pointer, :long, :int], :int
-    attach_function :xdo_type, [:pointer, :long, :string, :long], :int
-    attach_function :xdo_keysequence, [:pointer, :long, :string, :long], :int
-    attach_function :xdo_get_window_size, [:pointer, :long, :pointer, :pointer], :int
-    attach_function :xdo_window_search, [:pointer, :pointer, :pointer, :pointer], :int
+# add mousemove_relative to xdo
+module XDo
+  module Mouse
+      extend XDo::Mouse
+      def move_relative(x, y, speed = 2, set = true, sync = true)
+        if set
+          opts = []
+          opts << "--sync" if sync
+          `#{XDOTOOL} mousemove_relative #{opts.join(" ")} -- #{x} #{y}`
+          return [x, y]
+        else
+          raise(ArgumentError, "speed has to be > 0 (default is 2), was #{speed}!") if speed <= 0
+          pos = position #Current cursor position
+          act_x = pos[0]
+          act_y = pos[1]
+          aim_x = x
+          aim_y = y
+          #Create the illusion of a fluent movement (hey, that statement sounds better in German, really! ;-))
+          loop do
+            #Change position as indiciated by +speed+
+            if act_x > aim_x
+              act_x -= speed
+            elsif act_x < aim_x
+              act_x += speed
+            end
+            if act_y > aim_y
+              act_y -= speed
+            elsif act_y < aim_y
+              act_y += speed
+            end
+            #Move to computed position
+            move(act_x, act_y, speed, true)
+            #Check wheather the cursor's current position is inside an 
+            #acceptable area around the goal position. The size of this 
+            #area is defined by +speed+; this check ensures we don't get 
+            #an infinite loop for unusual conditions. 
+            if ((aim_x - speed)..(aim_x + speed)).include? act_x
+              if ((aim_y - speed)..(aim_y + speed)).include? act_y
+                break
+              end #if in Y-Toleranz
+            end #if in X-Toleranz
+          end #loop
+          #Correct the cursor position to point to the exact point specified. 
+          #This is for the case the "acceptable area" condition above triggers. 
+          if position != [x, y]
+            move(x, y, 1, true)
+          end #if position != [x, y]
+          
+        end #if set
+        [x, y]
+      end
   end
-
-  class XdoSearch < FFI::Struct
-    layout :title, :pointer,
-           :winclass, :pointer,
-           :winclassname, :pointer,
-           :winname, :pointer,
-           :pid, :int,
-           :max_depth, :long,
-           :only_visible, :int,
-           :screen, :int,
-           :require, :int,
-           :searchmask, :uint,
-           :desktop, :long
-  end # class XdoSearch
+end
+  
+class FingerPoken::Target::Xdo < FingerPoken::Target
 
   def initialize(config)
     super(config)
-    @xdo = LibXdo::xdo_new(nil)
-    if @xdo.null?
-       raise "xdo_new failed"
-    end
-
-    search = XdoSearch.new
-    search[:searchmask] = 1 << 2 # SEARCH_NAME, from xdo.h
-    search[:max_depth] = 0
-    search[:winname] = FFI::MemoryPointer.new(:char, 3)
-    search[:winname].put_string(0, ".*")
-    ptr_nwindows = FFI::MemoryPointer.new(:ulong, 1)
-    ptr_winlist = FFI::MemoryPointer.new(:pointer, 1)
-    LibXdo::xdo_window_search(@xdo, search, ptr_winlist, ptr_nwindows)
-    nwindows = ptr_nwindows.read_long
-    @rootwin = ptr_winlist.read_pointer.read_array_of_long(nwindows)[0]
-
-    ptr_x = FFI::MemoryPointer.new(:int, 1)
-    ptr_y = FFI::MemoryPointer.new(:int, 1)
-
-    LibXdo::xdo_get_window_size(@xdo, @rootwin, ptr_x, ptr_y)
-    @screen_x = ptr_x.read_int
-    @screen_y = ptr_y.read_int
+    @rootwin = XDo::XWindow.from_root 
+    @screen_x, @screen_y = @rootwin.size()
   end
 
   def mousemove_relative(x, y)
-    return LibXdo::xdo_mousemove_relative(@xdo, x, y)
+    return XDo::Mouse.move_relative(x, y)
   end
 
   def mousemove_absolute(px, py)
@@ -72,44 +79,44 @@ class FingerPoken::Target::Xdo < FingerPoken::Target
     x = (((@screen_x + xbuf) * px) - (xbuf / 2)).to_i
     y = (((@screen_y + ybuf) * py) - (ybuf / 2)).to_i
 
-    return LibXdo::xdo_mousemove(@xdo, x, y, 0)
+    return XDo::Mouse.move(x, y)
   end
 
   def click(button)
-    return LibXdo::xdo_click(@xdo, 0, button.to_i)
+    return XDo::Mouse.click(nil, nil, button.to_i)
   end
 
   def mousedown(button)
-    return LibXdo::xdo_mousedown(@xdo, 0, button.to_i)
+    return XDo::Mouse.down(button.to_i)
   end
 
   def mouseup(button)
-    return LibXdo::xdo_mouseup(@xdo, 0, button.to_i)
+    return XDo::Mouse.up(button.to_i)
   end
 
   def type(string)
-    return LibXdo::xdo_type(@xdo, 0, string, 12000)
+    return XDo::Keyboard.type(string)
   end
 
   def keypress(key)
     if key.is_a?(String)
       if key.length == 1
         # Assume letter
-        LibXdo::xdo_type(@xdo, 0, key, 12000)
+        type(key)
       else
         # Assume keysym
-        LibXdo::xdo_keysequence(@xdo, 0, key, 12000)
+        XDo::Keyboard.char(key)
       end
     else
       # type printables, key others.
       if 32.upto(127).include?(key)
-        LibXdo::xdo_type(@xdo, 0, key.chr, 12000)
+        type(key.chr)
       else
         case key
           when 8 
-            LibXdo::xdo_keysequence(@xdo, 0, "BackSpace", 12000)
+            XDo::Keyboard.char("BackSpace")
           when 13
-            LibXdo::xdo_keysequence(@xdo, 0, "Return", 12000)
+            XDo::Keyboard.char("Return")
           else
             puts "I don't know how to type web keycode '#{key}'"
           end # case key
